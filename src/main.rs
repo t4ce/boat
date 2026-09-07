@@ -209,14 +209,6 @@ const SHIP_SCALE: f32 = 0.65;
 const SHIP_BIRD_HEIGHT: f32 = 38.0;
 const HID_KEY_TAB: u8 = 0x2b;
 const FLYCAM_KEYS: [u8; 6] = [0x04, 0x07, 0x08, 0x14, 0x16, 0x1a]; // A/D/E/Q/S/W
-const HEAD_WORLD_TRANSLATIONS: [[f32; 3]; HEAD_INSTANCE_COUNT as usize] = [
-    // Quadrants II, I, III, IV respectively. Keep every helmet on Z = 0.
-    [-HEAD_PLANE_OFFSET, HEAD_PLANE_OFFSET, 0.0],
-    [HEAD_PLANE_OFFSET, HEAD_PLANE_OFFSET, 0.0],
-    [-HEAD_PLANE_OFFSET, -HEAD_PLANE_OFFSET, 0.0],
-    [HEAD_PLANE_OFFSET, -HEAD_PLANE_OFFSET, 0.0],
-];
-
 /// Initial Blender-style editor camera for the retained scene.
 fn presentation_camera() -> Camera {
     Camera {
@@ -451,8 +443,6 @@ pub struct GeometryProbe {
     material_parameters: [RetainedMaterialParameters; ASSET_COUNT],
     retained_meshes: [Option<RetainedMesh>; ASSET_COUNT],
     ship_seed_buffer: Buffer,
-    selected_asset: usize,
-    number_keys: u8,
     flycam: FlyCam,
     camera_mode: CameraMode,
     tab_down: bool,
@@ -606,8 +596,6 @@ impl GeometryProbe {
             }),
             retained_meshes,
             ship_seed_buffer,
-            selected_asset: 0,
-            number_keys: 0,
             flycam: FlyCam::new(camera, FLYCAM_SPEED),
             camera_mode: CameraMode::Fly,
             tab_down: false,
@@ -699,11 +687,11 @@ impl GeometryProbe {
                 .device
                 .acquire_ui4_surface(self.frame.window_id())
                 .map_err(|code| GeometryProbeError::Vgpu("surface-acquire", code))?;
-            let mesh = self.retained_meshes[self.selected_asset].ok_or(GeometryProbeError::Contract)?;
+            let mesh = self.retained_meshes[0].ok_or(GeometryProbeError::Contract)?;
             let vertices =
-                self.asset_vertex_buffers[self.selected_asset].ok_or(GeometryProbeError::Contract)?;
+                self.asset_vertex_buffers[0].ok_or(GeometryProbeError::Contract)?;
             let indices =
-                self.asset_index_buffers[self.selected_asset].ok_or(GeometryProbeError::Contract)?;
+                self.asset_index_buffers[0].ok_or(GeometryProbeError::Contract)?;
             let seeds = ship_seeds(elapsed_millis);
             write_exact(self.device, self.ship_seed_buffer, 0, retained_seed_bytes(&seeds))
                 .map_err(|code| GeometryProbeError::Vgpu("ship-seed-upload", code))?;
@@ -711,8 +699,8 @@ impl GeometryProbe {
                 camera,
                 material: RetainedMaterial {
                     textures: retained_material_texture_ids(
-                        &self.material_textures[self.selected_asset],
-                        ASSETS[self.selected_asset].sampled_material,
+                        &self.material_textures[0],
+                        ASSETS[0].sampled_material,
                     ),
                     // V2 carries every scalar in material_parameters;
                     // the legacy scalar stays zero to avoid ambiguity.
@@ -731,7 +719,7 @@ impl GeometryProbe {
                 RetainedFrameSubmitV3 {
                     frame: RetainedFrameSubmitV2 {
                         frame: submit,
-                        material_parameters: self.material_parameters[self.selected_asset],
+                        material_parameters: self.material_parameters[0],
                     },
                     seed_buffer: self.ship_seed_buffer.raw(),
                     seed_offset: 0,
@@ -804,42 +792,6 @@ impl GeometryProbe {
         self.tab_down = tab_down;
         if let CameraMode::BirdFollow(slot) = self.camera_mode {
             self.flycam.camera = bird_camera(slot, elapsed_millis);
-        }
-        Ok(())
-    }
-
-    fn service_asset_hotkeys(&mut self) -> Result<(), GeometryProbeError> {
-        let state = self
-            .frame
-            .keyboard_state()
-            .map_err(|error| GeometryProbeError::Ui4("asset-hotkeys", error))?;
-        let current = state.map_or(0, |keyboard| {
-            let mut bits = 0u8;
-            for slot in 0..ASSET_COUNT {
-                if keyboard.is_down(0x1e + slot as u8) {
-                    bits |= 1 << slot;
-                }
-            }
-            bits
-        });
-        let pressed = current & !self.number_keys;
-        self.number_keys = current;
-        if pressed != 0 {
-            let slot = pressed.trailing_zeros() as usize;
-            if slot < ASSET_COUNT {
-                self.selected_asset = slot;
-                logl::log(
-                    level::INFO,
-                    format_args!(
-                        "Boat: asset hotkey={} selected={} vertices={} indices={} instances={}",
-                        slot + 1,
-                        ASSETS[slot].name,
-                        ASSETS[slot].vertex_count,
-                        ASSETS[slot].index_count,
-                        if ASSETS[slot].helmet_program { 4 } else { 1 }
-                    ),
-                );
-            }
         }
         Ok(())
     }
@@ -946,59 +898,6 @@ impl GeometryProbe {
             .take_first_presentation()
             .map_err(|error| GeometryProbeError::Ui4("first-presentation", error))
     }
-}
-
-fn retained_seeds(
-    elapsed_millis: u64,
-    helmet_program: bool,
-) -> [RetainedTransformSeed; trueos::vgpu::MAX_RETAINED_TRANSFORM_SEEDS] {
-    let seconds = elapsed_millis as f32 * 0.001;
-    let half_angle = core::f32::consts::FRAC_PI_4 * seconds;
-    let clockwise = [-0.0, 0.0, -libm::sinf(half_angle), libm::cosf(half_angle)];
-    let counter_clockwise = [0.0, 0.0, libm::sinf(half_angle), libm::cosf(half_angle)];
-    let half_cycle = (elapsed_millis % 1_000) as f32;
-    let pulse = libm::fabsf(half_cycle - 500.0) / 500.0;
-    let mut seeds = [RetainedTransformSeed::default(); trueos::vgpu::MAX_RETAINED_TRANSFORM_SEEDS];
-    for (slot, seed) in seeds
-        .iter_mut()
-        .take(retained_seed_count(helmet_program) as usize)
-        .enumerate()
-    {
-        let world_translation = if helmet_program {
-            HEAD_WORLD_TRANSLATIONS[slot]
-        } else {
-            [0.0; 3]
-        };
-        let world_rotation = match slot {
-            _ if !helmet_program => [0.0, 0.0, 0.0, 1.0],
-            0 => clockwise,
-            1 => counter_clockwise,
-            _ => [0.0, 0.0, 0.0, 1.0],
-        };
-        let world_scale = if !helmet_program {
-            1.0
-        } else if slot == 2 {
-            HELMET_SCALE * pulse
-        } else {
-            HELMET_SCALE
-        };
-        *seed = RetainedTransformSeed {
-            // Keep object TRS in world space.  The retained vertex shader
-            // applies the live `camera.view_projection` after this model
-            // matrix, so local Z is never converted into a screen-space scale.
-            translation: world_translation,
-            scale: [world_scale; 3],
-            rotation: world_rotation,
-            local_radius: 1.0,
-            previous_translation: world_translation,
-            // All four instances are compacted into the retained mesh's one
-            // proven draw group. The upper 16 bits select each instance's
-            // group-local compaction slot.
-            draw_group: 0,
-            flags: (slot as u32) << 16,
-        };
-    }
-    seeds
 }
 
 /// Build the shader's WGSL-compatible camera block.  Model seeds remain in
@@ -1188,14 +1087,6 @@ fn invert_mat4(matrix: [f32; 16]) -> Option<[f32; 16]> {
         }
     }
     Some(inverse)
-}
-
-const fn retained_seed_count(helmet_program: bool) -> u32 {
-    if helmet_program {
-        HEAD_INSTANCE_COUNT
-    } else {
-        1
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
