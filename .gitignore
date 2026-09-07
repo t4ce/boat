@@ -1,0 +1,7 @@
+# Rust and TRUEOS Blueprint build output
+/target/
+
+# Editor and operating-system metadata
+.DS_Store
+.idea/
+.vscode/

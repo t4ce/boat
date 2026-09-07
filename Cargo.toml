@@ -1,0 +1,30 @@
+[package]
+name = "boat"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[package.metadata.trueos-blueprint]
+replicatable = true
+
+[[bin]]
+name = "boat"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libm = "0.2"
+trueos = { path = "../TRUEOS-Blueprints/api", features = ["default-global-allocator", "default-panic-handler"] }
+trueos-picasso = { path = "../TRUEOS-Picasso", default-features = false, features = ["blueprint"] }
+
+[build-dependencies]
+base64 = "0.22"
+bevy_mikktspace = "=0.15.3"
+gltf = { version = "1.4.1", default-features = false, features = ["utils"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
